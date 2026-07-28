@@ -1,0 +1,19 @@
+# Ultra Scraper – production pinned dependencies
+# Install with:  pip install -r requirements.txt
+
+# --- HTTP / TLS fingerprinting ---
+curl-cffi==0.7.4
+
+# --- HTML parsing (lightweight via lxml) ---
+scrapling==0.4.12
+
+# --- Web framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# --- Validation ---
+pydantic==2.10.4
+
+# --- Runtime ---
+anyio==4.8.0
+sniffio==1.3.1
