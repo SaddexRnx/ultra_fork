@@ -2,11 +2,13 @@
 # Install with:  pip install -r requirements.txt
 #
 # NOTE for Render deployment:
-#   You MUST add the following commands in Render's "Build Command" field
-#   (or your Dockerfile) so Playwright's Chromium is available:
+#   Set the build command to:
 #
-#       playwright install chromium
-#       playwright install-deps chromium
+#       pip install -r requirements.txt && patchright install chromium
+#
+#   (Do NOT include "patchright install-deps" — it requires root and will
+#    fail on Render.  Render's base image already has the needed system
+#    libraries for Chromium.)
 #
 # ──────────────────────────────────────────────────────────────────────────────
 
