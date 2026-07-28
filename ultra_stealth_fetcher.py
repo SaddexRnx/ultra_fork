@@ -17,7 +17,7 @@ import random
 from hashlib import sha256
 
 from curl_cffi.requests import AsyncSession, Response as CurlResponse
-from scrapling.fetchers import StealthyFetcher
+from scrapling.fetchers import AsyncStealthySession
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -145,15 +145,13 @@ async def fetch(
 
 async def _fallback_fetch(url: str, timeout: float) -> dict:
     """
-    Fetch *url* via Scrapling's ``StealthyFetcher.async_fetch``.
-
-    Retries once with different options if the first attempt fails.
+    Fetch *url* via Scrapling's ``AsyncStealthySession`` with human-like
+    delays, extra stealth patches, and Cloudflare reload logic.
     """
     last_exc = None
     for attempt in range(1, 3):
         try:
-            kw = dict(
-                url=url,
+            cfg = dict(
                 headless=True,
                 solve_cloudflare=True,
                 disable_resources=True,
@@ -161,21 +159,21 @@ async def _fallback_fetch(url: str, timeout: float) -> dict:
                 timeout=int(timeout * 1000),
                 google_search=True,
                 real_chrome=True,
+                extra_headers={"Accept-Language": "en-US,en;q=0.9"},
             )
             if attempt == 2:
-                kw["network_idle"] = False
-                kw["headless"] = False
+                cfg["network_idle"] = False
+                cfg["headless"] = False
 
-            response = await StealthyFetcher.async_fetch(**kw)
+            async with AsyncStealthySession(**cfg) as engine:
+                response = await engine.fetch(
+                    url,
+                    page_setup=_page_setup,
+                    page_action=_page_action,
+                )
 
-            body_bytes = response.body
-            body_str = body_bytes.decode("utf-8", errors="replace")
-
-            print(
-                f"Tier-2 (stealth) succeeded for {url} "
-                f"(status={response.status}, attempt={attempt})"
-            )
-
+            body_str = response.body.decode("utf-8", errors="replace")
+            print(f"Tier-2 succeeded for {url} (status={response.status}, attempt={attempt})")
             return {
                 "status": response.status,
                 "headers": dict(response.headers),
@@ -188,10 +186,40 @@ async def _fallback_fetch(url: str, timeout: float) -> dict:
 
         except Exception as exc:
             last_exc = exc
-            print(
-                f"  Tier-2 attempt {attempt} failed for {url}: {exc}"
-            )
+            print(f"  Tier-2 attempt {attempt} failed for {url}: {exc}")
 
-    raise RuntimeError(
-        f"Both tiers failed for {url}: {last_exc}"
-    ) from last_exc
+    raise RuntimeError(f"Both tiers failed for {url}: {last_exc}") from last_exc
+
+
+# ---------------------------------------------------------------------------
+# Page-level callbacks (used inside _fallback_fetch via closure)
+# ---------------------------------------------------------------------------
+
+async def _page_setup(page) -> None:
+    """Run before navigation: random delay + extra stealth patches."""
+    delay = random.uniform(2, 5)
+    print(f"  Tier-2 waiting {delay:.1f}s before navigation")
+    await asyncio.sleep(delay)
+    await page.add_init_script(
+        """
+        Object.defineProperty(navigator, 'webdriver', {get: () => false});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        """
+    )
+
+
+async def _page_action(page) -> None:
+    """Run after navigation + Cloudflare solve: reload if challenge persists."""
+    await asyncio.sleep(random.uniform(1, 3))
+    html = await page.content()
+    first_500 = html[:500].lower()
+    if any(kw in first_500 for kw in ["captcha", "challenge", "cloudflare"]):
+        print("  Tier-2 Cloudflare challenge still detected, waiting 5s then reloading...")
+        await asyncio.sleep(5)
+        await page.reload(wait_until="load")
+        await page.wait_for_timeout(3000)
+        html_after = await page.content()
+        if any(kw in html_after[:200].lower() for kw in ["captcha", "challenge", "cloudflare"]):
+            print("  Tier-2 Cloudflare still present after reload")
+        else:
+            print("  Tier-2 Cloudflare resolved on reload!")
