@@ -17,13 +17,13 @@ POST /scrape
 import asyncio
 import logging
 import traceback
-from typing import List, Optional
+from typing import List
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl
 
-from ultra_stealth_fetcher import UltraStealthFetcher
+from ultra_stealth_fetcher import fetch
 from smart_adaptor import SmartAdaptor
 from memory_safe_cache import ResponseCache, DomainRateLimiter
 
@@ -52,21 +52,13 @@ app = FastAPI(
 # Shared resources  (lifespan-managed)
 # ---------------------------------------------------------------------------
 
-_fetcher: Optional[UltraStealthFetcher] = None
-_cache: Optional[ResponseCache] = None
-_limiter: Optional[DomainRateLimiter] = None
+_cache: ResponseCache | None = None
+_limiter: DomainRateLimiter | None = None
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    global _fetcher, _cache, _limiter
-    _fetcher = UltraStealthFetcher(
-        impersonate="chrome120",
-        max_retries=3,
-        base_backoff=1.0,
-        max_backoff=30.0,
-        timeout=30.0,
-    )
+    global _cache, _limiter
     _cache = ResponseCache(ttl=3600)  # uses temp dir by default (writable on Render)
     _limiter = DomainRateLimiter(capacity=10, refill_rate=2.0)
     log.info("Ultra Scraper started – resources initialised.")
@@ -118,7 +110,6 @@ async def scrape_endpoint(body: ScrapeRequest) -> dict:
     The response is cached for 1 hour (TTL).  Repeated requests for the same
     URL within that window are served from the SQLite cache.
     """
-    assert _fetcher is not None
     assert _cache is not None
     assert _limiter is not None
 
@@ -147,7 +138,7 @@ async def scrape_endpoint(body: ScrapeRequest) -> dict:
         # ------------------------------------------------------------------
         # 3. Fetch via stealth fetcher
         # ------------------------------------------------------------------
-        result = await _fetcher.fetch(url)
+        result = await fetch(url)
         status = result["status"]
         html = result["body"]
 

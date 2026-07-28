@@ -2,9 +2,9 @@
 # Install with:  pip install -r requirements.txt
 
 # --- HTTP / TLS fingerprinting ---
-curl-cffi==0.7.4
+curl-cffi>=0.15.0
 
-# --- HTML parsing (lightweight via lxml) ---
+# --- HTML parsing + built-in async HTTP fetcher ---
 scrapling==0.4.12
 
 # --- Web framework ---
