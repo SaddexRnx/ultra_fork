@@ -200,8 +200,17 @@ async def _fallback_fetch(url: str, timeout: float) -> dict:
     # ------------------------------------------------------------------
     # Tier 3  –  ScraperAPI rescue fallback
     # ------------------------------------------------------------------
+    return await _scraperapi_fetch(url, last_exc)
+
+
+# ---------------------------------------------------------------------------
+# Tier 3  –  ScraperAPI (also callable directly from main.py)
+# ---------------------------------------------------------------------------
+
+async def _scraperapi_fetch(url: str, previous_error: Exception | None = None) -> dict:
+    """Call ScraperAPI with ``render=true``.  Raises RuntimeError on failure."""
     if not SCRAPER_API_KEY:
-        raise RuntimeError(f"Tier 2 stealth browser failed: {last_exc}")
+        raise RuntimeError(f"Tier 2 stealth browser failed: {previous_error}")
 
     print(f"🔄 Tier 3: Using ScraperAPI residential fallback for {url} (this may take up to 60s)...")
     try:

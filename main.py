@@ -23,7 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl
 
-from ultra_stealth_fetcher import fetch
+from ultra_stealth_fetcher import fetch, _scraperapi_fetch
 from smart_adaptor import SmartAdaptor
 from memory_safe_cache import ResponseCache, DomainRateLimiter
 
@@ -147,9 +147,6 @@ async def scrape_endpoint(body: ScrapeRequest) -> dict:
         html = result["body"]
         method_used = result.get("method_used", "unknown")
         impersonation = result.get("impersonation")
-
-        # Store in cache (even for errors, so we don't hammer failing sites)
-        await _cache.set(url, status, result["headers"], html)
         was_cached = False
 
     # ------------------------------------------------------------------
@@ -161,6 +158,29 @@ async def scrape_endpoint(body: ScrapeRequest) -> dict:
             for sel in body.selectors:
                 texts = [adaptor.text(el) for el in adaptor.css(sel)]
                 extracted[sel] = texts
+
+    # ------------------------------------------------------------------
+    # 5. Smart empty-data check  –  Tier 2 returned CAPTCHA? → Tier 3
+    # ------------------------------------------------------------------
+    all_empty = all(len(v) == 0 for v in extracted.values()) if extracted else False
+    if all_empty and method_used == "stealthy_fallback":
+        log.warning("⚠️ Tier 2 returned empty data (likely a CAPTCHA). Triggering Tier 3...")
+        result = await _scraperapi_fetch(url)
+        status = result["status"]
+        html = result["body"]
+        method_used = result["method_used"]
+        impersonation = result.get("impersonation")
+
+        extracted = {}
+        if body.selectors:
+            with SmartAdaptor(html, url=url) as adaptor:
+                for sel in body.selectors:
+                    texts = [adaptor.text(el) for el in adaptor.css(sel)]
+                    extracted[sel] = texts
+
+    # Cache the final response (Tier 1/3 only — never cache CAPTCHA from Tier 2)
+    if not was_cached:
+        await _cache.set(url, status, result["headers"], html)
 
     return {
         "url": url,
