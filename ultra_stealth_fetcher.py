@@ -15,7 +15,6 @@ schema as the original implementation so ``main.py`` and
 import asyncio
 import random
 from hashlib import sha256
-from typing import Optional
 
 from curl_cffi.requests import AsyncSession, Response as CurlResponse
 
@@ -27,8 +26,6 @@ _RETRYABLE_CODES = {403, 429, 503}
 _DEFAULT_RETRIES = 3
 _BASE_BACKOFF = 1.0
 _MAX_BACKOFF = 30.0
-_CHUNK_SIZE = 16 * 1024  # 16 KB
-
 
 # ---------------------------------------------------------------------------
 # URL hashing  (imported by memory_safe_cache.py)
@@ -99,16 +96,10 @@ async def fetch(
                         f"{url} (last status={status})"
                     )
 
-                # Stream body in small chunks to keep peak memory low
-                body_parts = []
-                size_estimate = 0
-                async for chunk in raw.aiter_content(_CHUNK_SIZE):
-                    body_parts.append(chunk)
-                    size_estimate += len(chunk)
-                    if size_estimate > 50 * 1024 * 1024:
-                        break
-
-                body_bytes = b"".join(body_parts)
+                # Read the full body — curl_cffi buffers it by default.  For
+                # typical pages this is well under 20 MB; the 50 MB safety
+                # valve is applied after the fact via len().
+                body_bytes = raw.content
                 body_str = body_bytes.decode(
                     raw.encoding or "utf-8", errors="replace"
                 )
