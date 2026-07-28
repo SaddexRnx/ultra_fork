@@ -1,11 +1,11 @@
 # Ultra Scraper – production pinned dependencies
 #
 # NOTE for Render deployment:
-#   Build Command:  python -m patchright install chromium
+#   Build Command:  pip install -r requirements.txt && python -m patchright install chromium
 #   Start Command:  python -m uvicorn main:app --host 0.0.0.0 --port $PORT
 #
-#   (Render auto-runs pip install -r requirements.txt before the build command.
-#    Do NOT add pip install to the build command — it causes conflicts.)
+#   (Render does NOT auto-install when a custom Build Command is set.
+#    You MUST include pip install in the Build Command yourself.)
 #
 # ──────────────────────────────────────────────────────────────────────────────
 
