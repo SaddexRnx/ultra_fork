@@ -4,7 +4,7 @@
 # --- HTTP / TLS fingerprinting ---
 curl-cffi>=0.15.0
 
-# --- HTML parsing + built-in async HTTP fetcher ---
+# --- HTML parsing (via lxml / Selector) ---
 scrapling==0.4.12
 
 # --- Web framework ---

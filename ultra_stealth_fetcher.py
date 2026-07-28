@@ -1,34 +1,37 @@
 """
 ultra_stealth_fetcher.py
 ------------------------
-Thin async wrapper around Scrapling's battle-tested ``AsyncFetcher``.
+Async HTTP fetcher using ``curl_cffi`` directly with Chrome 120
+impersonation, exponential-backoff retry, and streaming body reads.
 
-Eliminates manual ``curl_cffi`` management — delegates TLS fingerprinting,
-connection pooling, proxy rotation, and stealth headers to the Scrapling
-engine that is already tested on thousands of targets.
+Avoids Scrapling's import chain (which pulls in Playwright unnecessarily)
+while still giving us battle-tested TLS fingerprinting via curl_cffi.
 
-The public API matches the original contract so ``main.py`` and
-``memory_safe_cache.py`` require no changes.
+Exposes a single ``async def fetch(url)`` that returns the same dict
+schema as the original implementation so ``main.py`` and
+``memory_safe_cache.py`` are unaffected.
 """
 
 import asyncio
 import random
 from hashlib import sha256
+from typing import Optional
 
-from scrapling.fetchers import AsyncFetcher
+from curl_cffi.requests import AsyncSession, Response as CurlResponse
 
 # ---------------------------------------------------------------------------
-# Retry configuration
+# Configuration
 # ---------------------------------------------------------------------------
 
 _RETRYABLE_CODES = {403, 429, 503}
 _DEFAULT_RETRIES = 3
 _BASE_BACKOFF = 1.0
 _MAX_BACKOFF = 30.0
+_CHUNK_SIZE = 16 * 1024  # 16 KB
 
 
 # ---------------------------------------------------------------------------
-# URL hashing  (kept here because memory_safe_cache.py imports this)
+# URL hashing  (imported by memory_safe_cache.py)
 # ---------------------------------------------------------------------------
 
 def url_hash(url: str) -> str:
@@ -37,7 +40,7 @@ def url_hash(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Backoff helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _backoff_delay(attempt: int) -> float:
@@ -48,7 +51,7 @@ def _backoff_delay(attempt: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Core fetch wrapper
+# Core fetch
 # ---------------------------------------------------------------------------
 
 async def fetch(
@@ -60,61 +63,72 @@ async def fetch(
     max_redirects: int = 10,
 ) -> dict:
     """
-    Fetch *url* via Scrapling's ``AsyncFetcher`` with Chrome 120
-    impersonation and stealth headers.
+    Perform an HTTP GET with TLS fingerprint spoofing.
 
-    Returns the same dict shape as the original implementation::
+    Returns::
 
         {"status": int, "headers": dict, "body": str, "url": str, "cached": bool}
 
     Raises ``RuntimeError`` when all retries are exhausted.
     """
     for attempt in range(1, _DEFAULT_RETRIES + 1):
-        try:
-            response = await AsyncFetcher.get(
-                url,
-                impersonate=impersonate,
-                stealthy_headers=True,
-                timeout=timeout,
-                follow_redirects=follow_redirects,
-                max_redirects=max_redirects,
-            )
+        # Fresh session per attempt so TLS state is always clean.
+        async with AsyncSession() as session:
+            try:
+                raw: CurlResponse = await session.get(
+                    url,
+                    impersonate=impersonate,
+                    timeout=timeout,
+                    allow_redirects=follow_redirects,
+                    max_redirects=max_redirects,
+                )
 
-            status = response.status
+                status = raw.status_code
 
-            # Retry on 403 / 429 / 503
-            if status in _RETRYABLE_CODES:
-                if attempt < _DEFAULT_RETRIES:
-                    print(
-                        f"Retry {attempt} failed for {url}: "
-                        f"HTTP {status} – backing off"
+                # Retry on 403 / 429 / 503
+                if status in _RETRYABLE_CODES:
+                    if attempt < _DEFAULT_RETRIES:
+                        print(
+                            f"Retry {attempt} failed for {url}: "
+                            f"HTTP {status} – backing off"
+                        )
+                        await asyncio.sleep(_backoff_delay(attempt))
+                        continue
+                    raise RuntimeError(
+                        f"Max retries ({_DEFAULT_RETRIES}) exhausted for "
+                        f"{url} (last status={status})"
                     )
+
+                # Stream body in small chunks to keep peak memory low
+                body_parts = []
+                size_estimate = 0
+                async for chunk in raw.aiter_content(_CHUNK_SIZE):
+                    body_parts.append(chunk)
+                    size_estimate += len(chunk)
+                    if size_estimate > 50 * 1024 * 1024:
+                        break
+
+                body_bytes = b"".join(body_parts)
+                body_str = body_bytes.decode(
+                    raw.encoding or "utf-8", errors="replace"
+                )
+
+                return {
+                    "status": status,
+                    "headers": dict(raw.headers),
+                    "body": body_str,
+                    "url": str(raw.url),
+                    "cached": False,
+                }
+
+            except Exception as exc:
+                if attempt < _DEFAULT_RETRIES:
+                    print(f"Retry {attempt} failed for {url}: {exc}")
                     await asyncio.sleep(_backoff_delay(attempt))
                     continue
                 raise RuntimeError(
-                    f"Max retries ({_DEFAULT_RETRIES}) exhausted for "
-                    f"{url} (last status={status})"
-                )
-
-            # Decode the raw body
-            body_bytes = response.body
-            body_str = body_bytes.decode("utf-8", errors="replace")
-
-            return {
-                "status": status,
-                "headers": dict(response.headers),
-                "body": body_str,
-                "url": str(response.url),
-                "cached": False,
-            }
-
-        except Exception as exc:
-            if attempt < _DEFAULT_RETRIES:
-                print(f"Retry {attempt} failed for {url}: {exc}")
-                await asyncio.sleep(_backoff_delay(attempt))
-                continue
-            raise RuntimeError(
-                f"Fetch failed for {url} after {_DEFAULT_RETRIES} retries: {exc}"
-            ) from exc
+                    f"Fetch failed for {url} after "
+                    f"{_DEFAULT_RETRIES} retries: {exc}"
+                ) from exc
 
     raise RuntimeError(f"Unreachable: {url}")  # pragma: no cover
