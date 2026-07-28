@@ -1,20 +1,32 @@
 # Ultra Scraper – production pinned dependencies
 #
 # NOTE for Render deployment:
-#   Render's native Python builder has issues with patchright.
-#   Use a Dockerfile instead (see Dockerfile in this directory).
-#   Steps:
-#     1. Push Dockerfile to repo
-#     2. Clear Build Command + Start Command in Render dashboard
-#     3. Manual Deploy → "Clear build cache & deploy"
+#   Build Command:  python -m patchright install chromium
+#   Start Command:  python -m uvicorn main:app --host 0.0.0.0 --port $PORT
+#
+#   (Render auto-runs pip install -r requirements.txt before the build command.
+#    Do NOT add pip install to the build command — it causes conflicts.)
 #
 # ──────────────────────────────────────────────────────────────────────────────
 
-# --- HTTP / TLS fingerprinting ---
-curl-cffi>=0.15.0
+# --- Scrapling (core) ---
+scrapling==0.4.12
+lxml>=6.1.1
+cssselect>=1.4.0
+orjson>=3.11.8
+tld>=0.13.2
+w3lib>=2.4.1
 
-# --- HTML parsing + stealth browser fallback (includes Playwright) ---
-scrapling[fetchers]==0.4.12
+# --- Scrapling fetchers extra (needed for stealth browser) ---
+curl-cffi>=0.15.0
+playwright==1.61.0
+patchright==1.61.2
+browserforge>=1.2.4
+apify-fingerprint-datapoints>=0.13.0
+click>=8.3.0
+msgspec>=0.21.1
+anyio>=4.13.0
+protego>=0.6.2
 
 # --- Web framework ---
 fastapi==0.115.6
@@ -22,5 +34,3 @@ uvicorn[standard]==0.34.0
 
 # --- Validation ---
 pydantic==2.10.4
-
-# (runtime deps like anyio, sniffio, idna are resolved automatically)
