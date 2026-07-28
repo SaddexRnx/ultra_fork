@@ -19,12 +19,12 @@ import logging
 import traceback
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl
 
 from ultra_stealth_fetcher import UltraStealthFetcher
-from smart_adaptor import SmartAdaptor, clean_text
+from smart_adaptor import SmartAdaptor
 from memory_safe_cache import ResponseCache, DomainRateLimiter
 
 # ---------------------------------------------------------------------------
@@ -61,23 +61,15 @@ _limiter: Optional[DomainRateLimiter] = None
 async def startup() -> None:
     global _fetcher, _cache, _limiter
     _fetcher = UltraStealthFetcher(
-        impersonate="chrome131",
+        impersonate="chrome120",
         max_retries=3,
         base_backoff=1.0,
         max_backoff=30.0,
         timeout=30.0,
     )
-    _cache = ResponseCache(db_path="scrape_cache.db", ttl=3600)
+    _cache = ResponseCache(ttl=3600)  # uses temp dir by default (writable on Render)
     _limiter = DomainRateLimiter(capacity=10, refill_rate=2.0)
     log.info("Ultra Scraper started – resources initialised.")
-
-
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    global _fetcher
-    if _fetcher:
-        await _fetcher.close()
-    log.info("Ultra Scraper shut down – fetcher session closed.")
 
 
 # ---------------------------------------------------------------------------

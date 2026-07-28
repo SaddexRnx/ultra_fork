@@ -75,7 +75,6 @@ def yield_elements(
 
     # We use lxml's XPath evaluator directly to avoid creating intermediate
     # Selector wrappers until the caller actually asks for each element.
-    from cssselect import parse as split_selectors
     from scrapling.core.translator import css_to_xpath as _css_to_xpath
 
     try:

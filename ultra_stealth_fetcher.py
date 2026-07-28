@@ -17,7 +17,6 @@ from hashlib import sha256
 from typing import Optional
 
 from curl_cffi.requests import AsyncSession, Response as CurlResponse
-from curl_cffi import CurlHttpVersion
 
 # ---------------------------------------------------------------------------
 # Rotating header pool  --  lightweight; we just pick one of these per request
@@ -164,8 +163,6 @@ class UltraStealthFetcher:
                         timeout=self._timeout,
                         allow_redirects=follow_redirects,
                         max_redirects=max_redirects,
-                        # Prefer HTTP/2 for better TLS fingerprint mimicry
-                        http_version=CurlHttpVersion.V2,
                     )
 
                     status = raw.status_code
