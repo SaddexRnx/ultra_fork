@@ -1,14 +1,12 @@
 # Ultra Scraper – production pinned dependencies
-# Install with:  pip install -r requirements.txt
 #
 # NOTE for Render deployment:
-#   Set the build command to:
-#
-#       pip install -r requirements.txt && patchright install chromium
-#
-#   (Do NOT include "patchright install-deps" — it requires root and will
-#    fail on Render.  Render's base image already has the needed system
-#    libraries for Chromium.)
+#   Render's native Python builder has issues with patchright.
+#   Use a Dockerfile instead (see Dockerfile in this directory).
+#   Steps:
+#     1. Push Dockerfile to repo
+#     2. Clear Build Command + Start Command in Render dashboard
+#     3. Manual Deploy → "Clear build cache & deploy"
 #
 # ──────────────────────────────────────────────────────────────────────────────
 
