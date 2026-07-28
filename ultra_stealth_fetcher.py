@@ -3,7 +3,7 @@ ultra_stealth_fetcher.py
 ------------------------
 Two-tier async fetcher with smart fallback:
 
-  Tier 1 (Primary)   – fast ``curl_cffi`` with Chrome 120 impersonation.
+  Tier 1 (Primary)   – fast ``curl_cffi`` with multiple impersonation profiles.
   Tier 2 (Fallback)  – Scrapling's ``StealthyFetcher`` with Playwright-based
                        stealth, Cloudflare / Datadome bypass, and JS rendering.
 
@@ -14,7 +14,6 @@ first.
 
 import asyncio
 import random
-import re
 from hashlib import sha256
 
 from curl_cffi.requests import AsyncSession, Response as CurlResponse
@@ -35,8 +34,8 @@ _BLOCKED_KEYWORDS = [
     "__cf_chl_tk",
 ]
 
-_RETRYABLE_CODES = {429, 503}  # 403 is now handled as "blocked" → triggers fallback
-_DEFAULT_RETRIES = 2
+_IMPERSONATIONS = ["chrome120", "chrome110", "safari17"]
+_DEFAULT_TIMEOUT = 90.0
 _BASE_BACKOFF = 1.0
 _MAX_BACKOFF = 10.0
 
@@ -55,13 +54,11 @@ def url_hash(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _backoff_delay(attempt: int) -> float:
-    """Exponential backoff with jitter, capped at ``_MAX_BACKOFF``."""
     delay = min(_BASE_BACKOFF * (2 ** (attempt - 1)), _MAX_BACKOFF)
     return delay + random.uniform(0, 0.5 * delay)
 
 
 def _is_blocked(status: int, body: str) -> bool:
-    """Return ``True`` if the response looks like a bot challenge page."""
     if status in (403, 429, 503):
         return True
     body_lower = body.lower()
@@ -75,74 +72,70 @@ def _is_blocked(status: int, body: str) -> bool:
 async def fetch(
     url: str,
     *,
-    impersonate: str = "chrome120",
-    timeout: float = 30.0,
+    timeout: float = _DEFAULT_TIMEOUT,
     follow_redirects: bool = True,
     max_redirects: int = 10,
 ) -> dict:
     """
-    Fetch *url*, automatically falling back to a stealth browser if the
-    primary ``curl_cffi`` request is blocked.
+    Fetch *url*, trying multiple impersonation profiles in Tier 1 before
+    falling back to a stealth browser.
 
     Returns::
 
         {"status": int, "headers": dict, "body": str, "url": str,
-         "cached": bool, "method_used": "curl_cffi" | "stealthy_fallback"}
+         "cached": bool, "method_used": "curl_cffi" | "stealthy_fallback",
+         "impersonation": str | None}
 
     Raises ``RuntimeError`` when both tiers fail.
     """
     # ------------------------------------------------------------------
-    # Tier 1  –  fast curl_cffi
+    # Tier 1  –  fast curl_cffi with multiple impersonations
     # ------------------------------------------------------------------
-    for attempt in range(1, _DEFAULT_RETRIES + 1):
-        async with AsyncSession() as session:
-            try:
-                raw: CurlResponse = await session.get(
-                    url,
-                    impersonate=impersonate,
-                    timeout=timeout,
-                    allow_redirects=follow_redirects,
-                    max_redirects=max_redirects,
-                )
-
-                status = raw.status_code
-                body_bytes = raw.content
-                body_str = body_bytes.decode(
-                    raw.encoding or "utf-8", errors="replace"
-                )
-
-                # Check if the response is a bot challenge page
-                if _is_blocked(status, body_str):
-                    print(
-                        f"Tier-1 blocked for {url} "
-                        f"(status={status}) – falling back to stealth browser"
+    for imp in _IMPERSONATIONS:
+        print(f"Tier-1 trying impersonation={imp} for {url}")
+        for attempt in range(1, 3):
+            async with AsyncSession() as session:
+                try:
+                    raw: CurlResponse = await session.get(
+                        url,
+                        impersonate=imp,
+                        timeout=timeout,
+                        allow_redirects=follow_redirects,
+                        max_redirects=max_redirects,
                     )
-                    # Proceed directly to Tier 2 (don't retry curl_cffi)
-                    return await _fallback_fetch(url, timeout)
 
-                return {
-                    "status": status,
-                    "headers": dict(raw.headers),
-                    "body": body_str,
-                    "url": str(raw.url),
-                    "cached": False,
-                    "method_used": "curl_cffi",
-                }
+                    status = raw.status_code
+                    body_bytes = raw.content
+                    body_str = body_bytes.decode(
+                        raw.encoding or "utf-8", errors="replace"
+                    )
 
-            except Exception as exc:
-                if attempt < _DEFAULT_RETRIES:
-                    print(f"Tier-1 retry {attempt} failed for {url}: {exc}")
-                    await asyncio.sleep(_backoff_delay(attempt))
-                    continue
-                # All curl_cffi retries exhausted — try the fallback
-                print(
-                    f"Tier-1 retries exhausted for {url} – "
-                    f"falling back to stealth browser: {exc}"
-                )
-                return await _fallback_fetch(url, timeout)
+                    if _is_blocked(status, body_str):
+                        print(
+                            f"  Tier-1 {imp} blocked (status={status}) "
+                            f"– trying next impersonation"
+                        )
+                        break
 
-    # If we get here, all curl_cffi attempts failed without exception
-    # (e.g., status-based retries exhausted) – try fallback
+                    return {
+                        "status": status,
+                        "headers": dict(raw.headers),
+                        "body": body_str,
+                        "url": str(raw.url),
+                        "cached": False,
+                        "method_used": "curl_cffi",
+                        "impersonation": imp,
+                    }
+
+                except Exception as exc:
+                    if attempt < 2:
+                        print(f"  Tier-1 {imp} retry {attempt} failed: {exc}")
+                        await asyncio.sleep(_backoff_delay(attempt))
+                        continue
+                    print(f"  Tier-1 {imp} exhausted: {exc}")
+                    break
+
+    # All impersonations failed – try stealth
     return await _fallback_fetch(url, timeout)
 
 
@@ -154,35 +147,51 @@ async def _fallback_fetch(url: str, timeout: float) -> dict:
     """
     Fetch *url* via Scrapling's ``StealthyFetcher.async_fetch``.
 
-    Uses a headless Chromium with stealth patches, Cloudflare challenge
-    solving, and resource blocking for speed.
+    Retries once with different options if the first attempt fails.
     """
-    try:
-        response = await StealthyFetcher.async_fetch(
-            url,
-            headless=True,
-            solve_cloudflare=True,
-            disable_resources=True,
-            network_idle=True,
-            timeout=int(timeout * 1000),  # StealthyFetcher expects milliseconds
-            google_search=True,
-        )
+    last_exc = None
+    for attempt in range(1, 3):
+        try:
+            kw = dict(
+                url=url,
+                headless=True,
+                solve_cloudflare=True,
+                disable_resources=True,
+                network_idle=True,
+                timeout=int(timeout * 1000),
+                google_search=True,
+                real_chrome=True,
+            )
+            if attempt == 2:
+                kw["network_idle"] = False
+                kw["headless"] = False
 
-        body_bytes = response.body
-        body_str = body_bytes.decode("utf-8", errors="replace")
+            response = await StealthyFetcher.async_fetch(**kw)
 
-        print(f"Tier-2 (stealth) succeeded for {url} (status={response.status})")
+            body_bytes = response.body
+            body_str = body_bytes.decode("utf-8", errors="replace")
 
-        return {
-            "status": response.status,
-            "headers": dict(response.headers),
-            "body": body_str,
-            "url": str(response.url),
-            "cached": False,
-            "method_used": "stealthy_fallback",
-        }
+            print(
+                f"Tier-2 (stealth) succeeded for {url} "
+                f"(status={response.status}, attempt={attempt})"
+            )
 
-    except Exception as exc:
-        raise RuntimeError(
-            f"Both tiers failed for {url}: {exc}"
-        ) from exc
+            return {
+                "status": response.status,
+                "headers": dict(response.headers),
+                "body": body_str,
+                "url": str(response.url),
+                "cached": False,
+                "method_used": "stealthy_fallback",
+                "impersonation": None,
+            }
+
+        except Exception as exc:
+            last_exc = exc
+            print(
+                f"  Tier-2 attempt {attempt} failed for {url}: {exc}"
+            )
+
+    raise RuntimeError(
+        f"Both tiers failed for {url}: {last_exc}"
+    ) from last_exc

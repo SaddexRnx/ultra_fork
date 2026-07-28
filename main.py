@@ -77,6 +77,8 @@ class ScrapeResponse(BaseModel):
     url: str
     status: int
     cached: bool
+    method_used: str
+    impersonation: str | None
     data: dict  # selector -> list of extracted texts
 
 
@@ -124,6 +126,8 @@ async def scrape_endpoint(body: ScrapeRequest) -> dict:
         html = cached.body
         status = cached.status
         was_cached = True
+        method_used = "cache"
+        impersonation = cached.headers.get("x-impersonation")
     else:
         # ------------------------------------------------------------------
         # 2. Rate-limit check (per domain)
@@ -141,6 +145,8 @@ async def scrape_endpoint(body: ScrapeRequest) -> dict:
         result = await fetch(url)
         status = result["status"]
         html = result["body"]
+        method_used = result.get("method_used", "unknown")
+        impersonation = result.get("impersonation")
 
         # Store in cache (even for errors, so we don't hammer failing sites)
         await _cache.set(url, status, result["headers"], html)
@@ -160,6 +166,8 @@ async def scrape_endpoint(body: ScrapeRequest) -> dict:
         "url": url,
         "status": status,
         "cached": was_cached,
+        "method_used": method_used,
+        "impersonation": impersonation,
         "data": extracted,
     }
 
