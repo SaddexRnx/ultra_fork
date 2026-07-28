@@ -1,22 +1,32 @@
 """
 ultra_stealth_fetcher.py
 ------------------------
-Two-tier async fetcher with smart fallback:
+Three-tier async fetcher with smart fallback:
 
   Tier 1 (Primary)   – fast ``curl_cffi`` with multiple impersonation profiles.
   Tier 2 (Fallback)  – Scrapling's ``AsyncStealthySession`` (Chromium-based)
                        with stealth, Cloudflare bypass, and JS rendering.
+  Tier 3 (Rescue)    – ScraperAPI residential proxy fallback (requires env var).
 
-If the primary response is blocked (403/429/503 or detection keywords), the
-fallback is triggered automatically.  All Tier-2 errors are caught cleanly.
+If Tier 1 is blocked, Tier 2 is tried.  If Tier 2 also fails, Tier 3 is
+triggered automatically.  All errors are caught cleanly.
 """
 
 import asyncio
+import os
 import random
+import urllib.request
+import urllib.parse
 from hashlib import sha256
 
 from curl_cffi.requests import AsyncSession, Response as CurlResponse
 from scrapling.fetchers import AsyncStealthySession
+
+# ---------------------------------------------------------------------------
+# API keys (from environment)
+# ---------------------------------------------------------------------------
+
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -187,4 +197,40 @@ async def _fallback_fetch(url: str, timeout: float) -> dict:
             last_exc = exc
             print(f"  Tier-2 attempt {attempt} failed: {exc}")
 
-    raise RuntimeError(f"Tier 2 stealth browser failed: {last_exc}")
+    # ------------------------------------------------------------------
+    # Tier 3  –  ScraperAPI rescue fallback
+    # ------------------------------------------------------------------
+    if not SCRAPER_API_KEY:
+        raise RuntimeError(f"Tier 2 stealth browser failed: {last_exc}")
+
+    print(f"🔄 Tier 3: Using ScraperAPI residential fallback for {url} (this may take up to 60s)...")
+    try:
+        params = urllib.parse.urlencode({
+            "api_key": SCRAPER_API_KEY,
+            "url": url,
+            "render": "true",
+        })
+        api_url = f"https://api.scraperapi.com?{params}"
+        req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            status = resp.status
+            body_str = resp.read().decode("utf-8", errors="replace")
+
+        if status == 200:
+            print(f"  Tier-3 succeeded for {url} (status={status})")
+            return {
+                "status": status,
+                "headers": dict(resp.headers),
+                "body": body_str,
+                "url": url,
+                "cached": False,
+                "method_used": "scraperapi_rescue",
+                "impersonation": None,
+            }
+
+        print(f"  Tier-3 returned non-200 status={status}")
+        raise RuntimeError(f"ScraperAPI returned status {status}")
+
+    except Exception as exc:
+        print(f"  Tier-3 failed: {exc}")
+        raise RuntimeError(f"All 3 tiers failed for {url}: {exc}") from exc
