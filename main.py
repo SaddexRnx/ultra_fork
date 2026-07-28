@@ -16,6 +16,7 @@ POST /scrape
 
 import asyncio
 import logging
+import traceback
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -100,13 +101,15 @@ class ScrapeResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    log.exception("Unhandled exception during request to %s", request.url)
+async def global_exception_handler(request: Request, exc: Exception):
+    print("🚨 CRITICAL ERROR IN SCRAPING API 🚨")
+    print(traceback.format_exc())
+
     return JSONResponse(
         status_code=500,
         content={
             "error": "Internal server error",
-            "detail": str(exc) if app.debug else "An unexpected error occurred.",
+            "detail": str(exc) # Temporarily show the real error for debugging
         },
     )
 

@@ -15,7 +15,9 @@ Two components:
 """
 
 import json
+import os
 import sqlite3
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -27,7 +29,7 @@ from ultra_stealth_fetcher import url_hash
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_DB_PATH = "scrape_cache.db"
+_DEFAULT_DB_PATH = os.path.join(tempfile.gettempdir(), "scraping_cache.db")
 _DEFAULT_TTL_SECONDS = 3600  # 1 hour
 _DEFAULT_BUCKET_CAPACITY = 10
 _DEFAULT_REFILL_RATE = 2.0  # tokens per second
