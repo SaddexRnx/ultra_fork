@@ -1,31 +1,45 @@
 """
 ultra_stealth_fetcher.py
 ------------------------
-Async HTTP fetcher using ``curl_cffi`` directly with Chrome 120
-impersonation, exponential-backoff retry, and streaming body reads.
+Two-tier async fetcher with smart fallback:
 
-Avoids Scrapling's import chain (which pulls in Playwright unnecessarily)
-while still giving us battle-tested TLS fingerprinting via curl_cffi.
+  Tier 1 (Primary)   – fast ``curl_cffi`` with Chrome 120 impersonation.
+  Tier 2 (Fallback)  – Scrapling's ``StealthyFetcher`` with Playwright-based
+                       stealth, Cloudflare / Datadome bypass, and JS rendering.
 
-Exposes a single ``async def fetch(url)`` that returns the same dict
-schema as the original implementation so ``main.py`` and
-``memory_safe_cache.py`` are unaffected.
+If the primary response is blocked (403/429/503 or detection keywords), the
+fallback is triggered automatically.  The caller receives whichever succeeds
+first.
 """
 
 import asyncio
 import random
+import re
 from hashlib import sha256
 
 from curl_cffi.requests import AsyncSession, Response as CurlResponse
+from scrapling.fetchers import StealthyFetcher
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-_RETRYABLE_CODES = {403, 429, 503}
-_DEFAULT_RETRIES = 3
+_BLOCKED_KEYWORDS = [
+    "cloudflare",
+    "captcha",
+    "challenge",
+    "access denied",
+    "just a moment",
+    "attention required",
+    "cf-ray",
+    "__cf_chl_tk",
+]
+
+_RETRYABLE_CODES = {429, 503}  # 403 is now handled as "blocked" → triggers fallback
+_DEFAULT_RETRIES = 2
 _BASE_BACKOFF = 1.0
-_MAX_BACKOFF = 30.0
+_MAX_BACKOFF = 10.0
+
 
 # ---------------------------------------------------------------------------
 # URL hashing  (imported by memory_safe_cache.py)
@@ -43,12 +57,19 @@ def url_hash(url: str) -> str:
 def _backoff_delay(attempt: int) -> float:
     """Exponential backoff with jitter, capped at ``_MAX_BACKOFF``."""
     delay = min(_BASE_BACKOFF * (2 ** (attempt - 1)), _MAX_BACKOFF)
-    jitter = random.uniform(0, 0.5 * delay)
-    return delay + jitter
+    return delay + random.uniform(0, 0.5 * delay)
+
+
+def _is_blocked(status: int, body: str) -> bool:
+    """Return ``True`` if the response looks like a bot challenge page."""
+    if status in (403, 429, 503):
+        return True
+    body_lower = body.lower()
+    return any(kw in body_lower for kw in _BLOCKED_KEYWORDS)
 
 
 # ---------------------------------------------------------------------------
-# Core fetch
+# Core fetch with smart fallback
 # ---------------------------------------------------------------------------
 
 async def fetch(
@@ -60,16 +81,20 @@ async def fetch(
     max_redirects: int = 10,
 ) -> dict:
     """
-    Perform an HTTP GET with TLS fingerprint spoofing.
+    Fetch *url*, automatically falling back to a stealth browser if the
+    primary ``curl_cffi`` request is blocked.
 
     Returns::
 
-        {"status": int, "headers": dict, "body": str, "url": str, "cached": bool}
+        {"status": int, "headers": dict, "body": str, "url": str,
+         "cached": bool, "method_used": "curl_cffi" | "stealthy_fallback"}
 
-    Raises ``RuntimeError`` when all retries are exhausted.
+    Raises ``RuntimeError`` when both tiers fail.
     """
+    # ------------------------------------------------------------------
+    # Tier 1  –  fast curl_cffi
+    # ------------------------------------------------------------------
     for attempt in range(1, _DEFAULT_RETRIES + 1):
-        # Fresh session per attempt so TLS state is always clean.
         async with AsyncSession() as session:
             try:
                 raw: CurlResponse = await session.get(
@@ -81,28 +106,19 @@ async def fetch(
                 )
 
                 status = raw.status_code
-
-                # Retry on 403 / 429 / 503
-                if status in _RETRYABLE_CODES:
-                    if attempt < _DEFAULT_RETRIES:
-                        print(
-                            f"Retry {attempt} failed for {url}: "
-                            f"HTTP {status} – backing off"
-                        )
-                        await asyncio.sleep(_backoff_delay(attempt))
-                        continue
-                    raise RuntimeError(
-                        f"Max retries ({_DEFAULT_RETRIES}) exhausted for "
-                        f"{url} (last status={status})"
-                    )
-
-                # Read the full body — curl_cffi buffers it by default.  For
-                # typical pages this is well under 20 MB; the 50 MB safety
-                # valve is applied after the fact via len().
                 body_bytes = raw.content
                 body_str = body_bytes.decode(
                     raw.encoding or "utf-8", errors="replace"
                 )
+
+                # Check if the response is a bot challenge page
+                if _is_blocked(status, body_str):
+                    print(
+                        f"Tier-1 blocked for {url} "
+                        f"(status={status}) – falling back to stealth browser"
+                    )
+                    # Proceed directly to Tier 2 (don't retry curl_cffi)
+                    return await _fallback_fetch(url, timeout)
 
                 return {
                     "status": status,
@@ -110,16 +126,63 @@ async def fetch(
                     "body": body_str,
                     "url": str(raw.url),
                     "cached": False,
+                    "method_used": "curl_cffi",
                 }
 
             except Exception as exc:
                 if attempt < _DEFAULT_RETRIES:
-                    print(f"Retry {attempt} failed for {url}: {exc}")
+                    print(f"Tier-1 retry {attempt} failed for {url}: {exc}")
                     await asyncio.sleep(_backoff_delay(attempt))
                     continue
-                raise RuntimeError(
-                    f"Fetch failed for {url} after "
-                    f"{_DEFAULT_RETRIES} retries: {exc}"
-                ) from exc
+                # All curl_cffi retries exhausted — try the fallback
+                print(
+                    f"Tier-1 retries exhausted for {url} – "
+                    f"falling back to stealth browser: {exc}"
+                )
+                return await _fallback_fetch(url, timeout)
 
-    raise RuntimeError(f"Unreachable: {url}")  # pragma: no cover
+    # If we get here, all curl_cffi attempts failed without exception
+    # (e.g., status-based retries exhausted) – try fallback
+    return await _fallback_fetch(url, timeout)
+
+
+# ---------------------------------------------------------------------------
+# Tier 2  –  Playwright-based stealth fallback
+# ---------------------------------------------------------------------------
+
+async def _fallback_fetch(url: str, timeout: float) -> dict:
+    """
+    Fetch *url* via Scrapling's ``StealthyFetcher.async_fetch``.
+
+    Uses a headless Chromium with stealth patches, Cloudflare challenge
+    solving, and resource blocking for speed.
+    """
+    try:
+        response = await StealthyFetcher.async_fetch(
+            url,
+            headless=True,
+            solve_cloudflare=True,
+            disable_resources=True,
+            network_idle=True,
+            timeout=int(timeout * 1000),  # StealthyFetcher expects milliseconds
+            google_search=True,
+        )
+
+        body_bytes = response.body
+        body_str = body_bytes.decode("utf-8", errors="replace")
+
+        print(f"Tier-2 (stealth) succeeded for {url} (status={response.status})")
+
+        return {
+            "status": response.status,
+            "headers": dict(response.headers),
+            "body": body_str,
+            "url": str(response.url),
+            "cached": False,
+            "method_used": "stealthy_fallback",
+        }
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Both tiers failed for {url}: {exc}"
+        ) from exc

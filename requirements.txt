@@ -1,11 +1,20 @@
 # Ultra Scraper – production pinned dependencies
 # Install with:  pip install -r requirements.txt
+#
+# NOTE for Render deployment:
+#   You MUST add the following commands in Render's "Build Command" field
+#   (or your Dockerfile) so Playwright's Chromium is available:
+#
+#       playwright install chromium
+#       playwright install-deps chromium
+#
+# ──────────────────────────────────────────────────────────────────────────────
 
 # --- HTTP / TLS fingerprinting ---
 curl-cffi>=0.15.0
 
-# --- HTML parsing (via lxml / Selector) ---
-scrapling==0.4.12
+# --- HTML parsing + stealth browser fallback (includes Playwright) ---
+scrapling[fetchers]==0.4.12
 
 # --- Web framework ---
 fastapi==0.115.6
