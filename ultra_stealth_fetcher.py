@@ -149,15 +149,34 @@ async def fetch(
 
 
 # ---------------------------------------------------------------------------
+# Environment-spoofing callback  (used by Tier 2 before every navigation)
+# ---------------------------------------------------------------------------
+
+async def _env_spoof_setup(page) -> None:
+    """Spoof hardware, geolocation, and permissions before page load."""
+    await page.add_init_script(
+        """
+        Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+        Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+        """
+    )
+    try:
+        await page.context.set_geolocation({"latitude": 40.7128, "longitude": -74.0060})
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Tier 2  –  Chromium-based stealth fallback  (crash-proof)
 # ---------------------------------------------------------------------------
 
 async def _fallback_fetch(url: str, timeout: float) -> dict:
     """
-    Fetch *url* via Scrapling's ``AsyncStealthySession`` (Chromium).
+    Maximum-stealth Tier 2 via Scrapling's ``AsyncStealthySession``.
 
-    Crash-proof: every operation is wrapped in try/except.  On failure
-    a clean ``RuntimeError`` is raised so the FastAPI endpoint never 500s.
+    Attempt 1: real Google Chrome with all stealth flags.
+    Attempt 2: patched Chromium (fallback if Chrome is unavailable).
+    All errors fall through cleanly to Tier 3.
     """
     last_exc = None
 
@@ -170,10 +189,18 @@ async def _fallback_fetch(url: str, timeout: float) -> dict:
             timeout=int(timeout * 1000),
             google_search=True,
             extra_headers={"Accept-Language": "en-US,en;q=0.9"},
+            block_webrtc=True,
+            hide_canvas=True,
+            locale="en-US",
+            timezone_id="America/New_York",
+            additional_args={
+                "permissions": ["geolocation"],
+            },
+            page_setup=_env_spoof_setup,
         )
 
-        if attempt == 2:
-            cfg["network_idle"] = False
+        if attempt == 1:
+            cfg["real_chrome"] = True
 
         try:
             async with AsyncStealthySession(**cfg) as engine:
