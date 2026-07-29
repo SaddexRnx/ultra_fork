@@ -1,23 +1,9 @@
-# Ultra Scraper – production pinned dependencies
-#
-# NOTE for Render deployment:
-#   Build Command:  pip install -r requirements.txt && python -m patchright install chromium
-#   Start Command:  python -m uvicorn main:app --host 0.0.0.0 --port $PORT
-#
-#   (Render does NOT auto-install when a custom Build Command is set.
-#    You MUST include pip install in the Build Command yourself.)
-#
-# ──────────────────────────────────────────────────────────────────────────────
-
-# --- Scrapling (core) ---
 scrapling==0.4.12
 lxml>=6.1.1
 cssselect>=1.4.0
 orjson>=3.11.8
 tld>=0.13.2
 w3lib>=2.4.1
-
-# --- Scrapling fetchers extra (needed for stealth browser) ---
 curl-cffi>=0.15.0
 playwright==1.61.0
 patchright==1.61.2
@@ -27,10 +13,10 @@ click>=8.3.0
 msgspec>=0.21.1
 anyio>=4.13.0
 protego>=0.6.2
-
-# --- Web framework ---
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-
-# --- Validation ---
 pydantic==2.10.4
+sqlalchemy>=2.0
+python-jose[cryptography]>=3.3
+httpx>=0.27
+python-multipart>=0.0.9

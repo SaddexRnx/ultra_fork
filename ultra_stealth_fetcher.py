@@ -270,3 +270,55 @@ async def _scraperapi_fetch(url: str, previous_error: Exception | None = None) -
     except Exception as exc:
         print(f"  Tier-3 failed: {exc}")
         raise RuntimeError(f"All 3 tiers failed for {url}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# BYOK Proxy Routing  —  user-supplied provider
+# ---------------------------------------------------------------------------
+
+async def proxy_fetch(url: str, proxy_config: dict) -> dict:
+    provider = proxy_config.get("provider", "").lower()
+    api_key = proxy_config.get("api_key", "")
+
+    if not api_key:
+        raise RuntimeError("No API key provided for proxy provider")
+
+    providers = {
+        "scraperapi": (
+            f"https://api.scraperapi.com?api_key={api_key}&url={urllib.parse.quote(url)}&render=true"
+        ),
+        "zenrows": (
+            f"https://api.zenrows.com/v1/?apikey={api_key}&url={urllib.parse.quote(url)}&js_render=true"
+        ),
+        "scrapingbee": (
+            f"https://app.scrapingbee.com/api/v1/?api_key={api_key}&url={urllib.parse.quote(url)}&render_js=true"
+        ),
+    }
+
+    api_url = providers.get(provider)
+    if not api_url:
+        raise RuntimeError(f"Unknown proxy provider: {provider}")
+
+    print(f"  BYOK proxy: using {provider} for {url}")
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            status = resp.status
+            body_str = resp.read().decode("utf-8", errors="replace")
+
+        if status == 200:
+            return {
+                "status": status,
+                "headers": dict(resp.headers),
+                "body": body_str,
+                "url": url,
+                "cached": False,
+                "method_used": f"byok_{provider}",
+                "impersonation": None,
+            }
+
+        raise RuntimeError(f"{provider} returned status {status}")
+
+    except Exception as exc:
+        print(f"  BYOK {provider} failed: {exc}")
+        raise RuntimeError(f"Proxy fetch failed: {exc}") from exc
