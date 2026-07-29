@@ -7,7 +7,7 @@ POST /scrape
 { "url": "...", "selectors": ["h1", ".price"] }
 ```
 
-> **Frontend repo / live UI:** https://github.com/SaddexRnx/uscraper-frontend — hosted at **https://uscraper.lovable.app**
+> **Frontend repo:** https://github.com/SaddexRnx/uscraper — live at **https://uscraper.duckdns.org/**
 > **Upstream library:** https://github.com/d4vinci/Scrapling
 
 ---
@@ -190,7 +190,7 @@ SCRAPINGBEE_KEY=
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-The frontend at https://uscraper.lovable.app connects by default to `https://uscraper.duckdns.org` — override the Backend API URL from the **Settings** page (gear icon) to point at your instance.
+The frontend at https://uscraper.duckdns.org/ connects by default to `https://uscraper.duckdns.org` — override the Backend API URL from the **Settings** page (gear icon) to point at your instance.
 
 ### Docker
 
@@ -215,8 +215,11 @@ Ultra Scraper is the mechanic; Scrapling is the factory. That's why 500 lines ca
 
 ---
 
-## Credits
+## Credits & thanks
 
-- Upstream: [Scrapling by d4vinci](https://github.com/d4vinci/Scrapling) — the actual heavy lifting.
-- Frontend: [uscraper-frontend](https://github.com/SaddexRnx/uscraper-frontend) — live at https://uscraper.lovable.app.
-- Contact: Telegram **[@Saddex_x](https://t.me/Saddex_x)**.
+- **Upstream: [Scrapling by d4vinci](https://github.com/d4vinci/Scrapling)** — the actual heavy lifting. Huge thanks to d4vinci; if you like it, **give it a ⭐**.
+- Frontend: [uscraper](https://github.com/SaddexRnx/uscraper) — live at https://uscraper.duckdns.org/.
+- If you like **Ultra Scraper**, a ⭐ on this repo means a lot.
+- Built by **Saddex** — portfolio: https://saddexrnx.github.io/
+- Contact: Telegram **[@Saddex_x](https://t.me/Saddex_x)**
+
