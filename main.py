@@ -83,19 +83,22 @@ class ScrapeResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Exception handler  –  never leak HTML tracebacks
+# Global safety net  –  never return HTTP 500 to the client
 # ---------------------------------------------------------------------------
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    print("🚨 CRITICAL ERROR IN SCRAPING API 🚨")
-    print(traceback.format_exc())
-
+    log.error("Unhandled exception: %s", exc)
     return JSONResponse(
-        status_code=500,
+        status_code=200,
         content={
-            "error": "Internal server error",
-            "detail": str(exc) # Temporarily show the real error for debugging
+            "url": str(request.url),
+            "status": 418,
+            "cached": False,
+            "method_used": "failed_safely",
+            "impersonation": None,
+            "data": {},
+            "error_message": "The target site's anti-bot system was too aggressive. Please try again later.",
         },
     )
 
@@ -106,90 +109,96 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.post("/scrape", response_model=ScrapeResponse)
 async def scrape_endpoint(body: ScrapeRequest) -> dict:
-    """
-    Fetch *url*, optionally extract data via CSS/XPath *selectors*.
-
-    The response is cached for 1 hour (TTL).  Repeated requests for the same
-    URL within that window are served from the SQLite cache.
-    """
-    assert _cache is not None
-    assert _limiter is not None
-
     url = str(body.url)
-
-    # ------------------------------------------------------------------
-    # 1. Check the persistent cache first
-    # ------------------------------------------------------------------
-    cached = await _cache.get(url)
-    if cached is not None:
-        log.info("Cache HIT for %s", url)
-        html = cached.body
-        status = cached.status
-        was_cached = True
-        method_used = "cache"
-        impersonation = cached.headers.get("x-impersonation")
-    else:
-        # ------------------------------------------------------------------
-        # 2. Rate-limit check (per domain)
-        # ------------------------------------------------------------------
-        from urllib.parse import urlparse
-        domain = urlparse(url).netloc
-        wait = _limiter.acquire(domain)
-        if wait > 0.0:
-            log.info("Rate-limited for %s – sleeping %.2f s", domain, wait)
-            await asyncio.sleep(wait)
+    try:
+        assert _cache is not None
+        assert _limiter is not None
 
         # ------------------------------------------------------------------
-        # 3. Fetch via stealth fetcher
+        # 1. Check the persistent cache first
         # ------------------------------------------------------------------
-        result = await fetch(url)
-        status = result["status"]
-        html = result["body"]
-        method_used = result.get("method_used", "unknown")
-        impersonation = result.get("impersonation")
-        was_cached = False
+        cached = await _cache.get(url)
+        if cached is not None:
+            log.info("Cache HIT for %s", url)
+            html = cached.body
+            status = cached.status
+            was_cached = True
+            method_used = "cache"
+            impersonation = cached.headers.get("x-impersonation")
+        else:
+            # ------------------------------------------------------------------
+            # 2. Rate-limit check (per domain)
+            # ------------------------------------------------------------------
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc
+            wait = _limiter.acquire(domain)
+            if wait > 0.0:
+                log.info("Rate-limited for %s – sleeping %.2f s", domain, wait)
+                await asyncio.sleep(wait)
 
-    # ------------------------------------------------------------------
-    # 4. Parse and extract
-    # ------------------------------------------------------------------
-    extracted: dict = {}
-    if body.selectors:
-        with SmartAdaptor(html, url=url) as adaptor:
-            for sel in body.selectors:
-                texts = [adaptor.text(el) for el in adaptor.css(sel)]
-                extracted[sel] = texts
+            # ------------------------------------------------------------------
+            # 3. Fetch via stealth fetcher
+            # ------------------------------------------------------------------
+            result = await fetch(url)
+            status = result["status"]
+            html = result["body"]
+            method_used = result.get("method_used", "unknown")
+            impersonation = result.get("impersonation")
+            was_cached = False
 
-    # ------------------------------------------------------------------
-    # 5. Smart empty-data check  –  Tier 2 returned CAPTCHA? → Tier 3
-    # ------------------------------------------------------------------
-    all_empty = all(len(v) == 0 for v in extracted.values()) if extracted else False
-    if all_empty and method_used == "stealthy_fallback":
-        log.warning("⚠️ Tier 2 returned empty data (likely a CAPTCHA). Triggering Tier 3...")
-        result = await _scraperapi_fetch(url)
-        status = result["status"]
-        html = result["body"]
-        method_used = result["method_used"]
-        impersonation = result.get("impersonation")
-
-        extracted = {}
+        # ------------------------------------------------------------------
+        # 4. Parse and extract
+        # ------------------------------------------------------------------
+        extracted: dict = {}
         if body.selectors:
             with SmartAdaptor(html, url=url) as adaptor:
                 for sel in body.selectors:
                     texts = [adaptor.text(el) for el in adaptor.css(sel)]
                     extracted[sel] = texts
 
-    # Cache the final response (Tier 1/3 only — never cache CAPTCHA from Tier 2)
-    if not was_cached:
-        await _cache.set(url, status, result["headers"], html)
+        # ------------------------------------------------------------------
+        # 5. Smart empty-data check  –  Tier 2 returned CAPTCHA? → Tier 3
+        # ------------------------------------------------------------------
+        all_empty = all(len(v) == 0 for v in extracted.values()) if extracted else False
+        if all_empty and method_used == "stealthy_fallback":
+            log.warning("⚠️ Tier 2 returned empty data (likely a CAPTCHA). Triggering Tier 3...")
+            result = await _scraperapi_fetch(url)
+            status = result["status"]
+            html = result["body"]
+            method_used = result["method_used"]
+            impersonation = result.get("impersonation")
 
-    return {
-        "url": url,
-        "status": status,
-        "cached": was_cached,
-        "method_used": method_used,
-        "impersonation": impersonation,
-        "data": extracted,
-    }
+            extracted = {}
+            if body.selectors:
+                with SmartAdaptor(html, url=url) as adaptor:
+                    for sel in body.selectors:
+                        texts = [adaptor.text(el) for el in adaptor.css(sel)]
+                        extracted[sel] = texts
+
+        # Cache the final response
+        if not was_cached:
+            await _cache.set(url, status, result["headers"], html)
+
+        return {
+            "url": url,
+            "status": status,
+            "cached": was_cached,
+            "method_used": method_used,
+            "impersonation": impersonation,
+            "data": extracted,
+        }
+
+    except Exception as e:
+        log.error("Scrape failed critically: %s", e)
+        return {
+            "url": url,
+            "status": 418,
+            "cached": False,
+            "method_used": "failed_safely",
+            "impersonation": None,
+            "data": {},
+            "error_message": "The target site's anti-bot system was too aggressive. Please try again later.",
+        }
 
 
 # ---------------------------------------------------------------------------
