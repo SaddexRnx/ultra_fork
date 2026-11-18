@@ -1,111 +1,42 @@
-# Ultra Scraper — Backend
+# Ultra Scraper (backend)
 
-A tiny, fast FastAPI wrapper around [Scrapling](https://github.com/d4vinci/Scrapling) that turns a giant scraping framework into a simple JSON API:
+A small FastAPI service that wraps [Scrapling](https://github.com/d4vinci/Scrapling) and exposes it as a simple JSON API:
 
 ```http
 POST /scrape
 { "url": "...", "selectors": ["h1", ".price"] }
 ```
 
-> **Frontend repo:** https://github.com/SaddexRnx/uscraper — live at **https://uscraper.duckdns.org/**
-> **Upstream library:** https://github.com/d4vinci/Scrapling
+The frontend repo is [here](https://github.com/SaddexRnx/uscraper), live at https://uscraper.duckdns.org/.
 
----
+## The idea
 
-## The idea in one paragraph
+Scrapling is a full scraping framework, around 50,000 lines of code, with its own HTTP client, TLS and JA3 fingerprinting, headless browser control, fingerprint generation, a Cloudflare solver, CSS and XPath engines, caching, rate limiting, and proxy rotation.
 
-Scrapling is ~50,000 lines of code — a full scraping framework that builds *everything* from scratch: its own HTTP client, TLS/JA3 fingerprinting via `curl_cffi`, a headless-browser automation layer (CDP wrappers), fingerprint generation (WebGL, canvas, audio, fonts, WebRTC), a Cloudflare challenge solver, CSS/XPath engines, a response cache, a rate limiter and a proxy rotator. **Ultra Scraper is ~500 lines** that import the right pieces of Scrapling and chain them together into a single, resilient `/scrape` endpoint. You get all the heavy lifting for free; the small surface area makes it *fast* to run and *easy* to reason about.
+Ultra Scraper is roughly 500 lines that pull in the pieces it needs and chain them into one `/scrape` endpoint. Scrapling does the heavy lifting. This repo just keeps the surface small so it is fast to run and easy to follow.
 
----
+## How a request is handled
 
-## The fallback chain
+Each request tries cheaper methods first and moves to heavier ones only when it gets blocked. The method that worked is returned as `method_used`.
 
-Every request tries increasingly heavy methods until one succeeds. The winning tier is returned as `method_used` so the frontend can badge it.
+1. **curl_cffi.** Impersonates a real Chrome TLS fingerprint. Fastest option and enough for basic WAFs.
+2. **AsyncStealthySession from Scrapling.** A real headless Chromium with BrowserForge fingerprints, patched navigator properties, and a Cloudflare challenge waiter.
+3. **Paid proxy fallback.** ScraperAPI, ZenRows, or ScrapingBee, if you supply a key.
 
-```text
-POST /scrape
-      │
-      ▼
-┌──────────────────────────────────────────────────────────┐
-│ 1.  curl_cffi                                            │
-│     Impersonates a real Chrome TLS/JA3 fingerprint.      │
-│     Cheapest, fastest. Beats basic WAFs.                 │
-│     method_used = "curl_cffi"                            │
-└──────────────────────────────────────────────────────────┘
-      │ blocked / challenge detected
-      ▼
-┌──────────────────────────────────────────────────────────┐
-│ 2.  AsyncStealthySession  (Scrapling)                    │
-│     Real headless Chromium via patchright, with          │
-│     BrowserForge fingerprints, patched navigator.        │
-│     webdriver / chrome.runtime / plugins, and a          │
-│     Cloudflare challenge waiter.                         │
-│     method_used = "stealthy_fallback"                    │
-└──────────────────────────────────────────────────────────┘
-      │ still blocked
-      ▼
-┌──────────────────────────────────────────────────────────┐
-│ 3.  Paid proxy fallback (BYOK)                           │
-│     ScraperAPI / ZenRows / ScrapingBee if a key is set.  │
-│     method_used = "<provider>"                           │
-└──────────────────────────────────────────────────────────┘
-```
+## The files
 
-That orchestration logic is the entire value of this repo — everything below it lives inside Scrapling.
+- `main.py` (~200 lines): the FastAPI app. Defines `/scrape`, `/history`, and `/health`, validates input, checks the bearer token and quota, runs each selector, and saves a small history row.
+- `ultra_stealth_fetcher.py` (~200 lines): the fallback chain above. Works out whether a response was blocked from the status code, response length, and markers like `cf-mitigated`. Returns a normalized `(status, html, method_used)` tuple.
+- `cache.py` (~50 lines): a small on-disk LRU keyed by URL and selectors. Skips non-idempotent status codes.
+- `auth.py` (~50 lines): token table and quota tracking. Tokens starting with `ADMIN-` unlock `/admin/*`.
 
----
+Everything below this, including the TLS spoofing and browser stealth, lives inside Scrapling.
 
-## What each piece does
+## API
 
-### `main.py` — the FastAPI app (~200 lines)
+### POST /scrape
 
-- Defines `POST /scrape`, `GET /history`, `GET /health`.
-- Validates the incoming JSON (`url`, `selectors: list[str]`).
-- Applies auth: `Authorization: Bearer <token>` → looks up quota and admin flag.
-- Calls `ultra_stealth_fetcher.fetch(url)` to get the DOM.
-- Runs each CSS selector against the returned page and packs the result into:
-
-  ```json
-  {
-    "url": "...",
-    "status": 200,
-    "cached": false,
-    "method_used": "curl_cffi",
-    "data": { "h1": ["..."], ".price": ["..."] }
-  }
-  ```
-
-- Persists a small history row (url, selectors, method, timestamp) for `/history`.
-
-### `ultra_stealth_fetcher.py` — the orchestrator (~200 lines)
-
-- Tier 1: `curl_cffi.requests.get(..., impersonate="chrome124")`.
-- Tier 2: `AsyncStealthySession()` from Scrapling — a real Chromium with fingerprint spoofing and a Cloudflare waiter baked in.
-- Tier 3: proxy fallback — forwards the URL to whichever paid provider the caller configured.
-- Decides "blocked vs OK" from status code, response length, and known challenge markers (`cf-mitigated`, `cf-browser-verification`, Datadome/Perimeterx signals).
-- Returns a normalized `(status, html, method_used)` tuple so `main.py` doesn't care which tier answered.
-
-### `cache.py` — response cache (~50 lines)
-
-- Small on-disk LRU keyed by `(url, sorted(selectors))`.
-- Skipped for non-idempotent status codes.
-- Sets `cached: true` in the response when a hit is served.
-
-### `auth.py` — tokens & quota (~50 lines)
-
-- Loads a token table (SQLite or a JSON file).
-- Tokens starting with `ADMIN-` unlock `/admin/*` (token generation, quota edits).
-- Every successful scrape increments the caller's `quota_used`.
-
-Everything else — TCP fingerprint spoofing, TLS negotiation, headless browser control, JS challenge execution, canvas/WebGL fingerprinting — lives inside Scrapling. This project just picks the right knob and turns it.
-
----
-
-## API reference
-
-### `POST /scrape`
-
-**Request**
+Requires `Authorization: Bearer <token>` and a JSON body:
 
 ```json
 {
@@ -114,9 +45,7 @@ Everything else — TCP fingerprint spoofing, TLS negotiation, headless browser 
 }
 ```
 
-Headers: `Authorization: Bearer <token>` (required), `Content-Type: application/json`.
-
-**Response — 200**
+A successful response:
 
 ```json
 {
@@ -132,94 +61,58 @@ Headers: `Authorization: Bearer <token>` (required), `Content-Type: application/
 }
 ```
 
-**Errors**
+Errors: `400` for bad input, `401` for a missing or invalid token, `402` if the quota is used up, `422` if every tier failed, and `5xx` for internal errors.
 
-| Status | Meaning |
-| --- | --- |
-| 400 | Malformed JSON, missing `url`, or invalid selector list |
-| 401 | Missing / invalid bearer token |
-| 402 | Quota exceeded |
-| 422 | All tiers failed to reach the target |
-| 5xx | Internal error — check server logs |
+### GET /history
 
-### `GET /history`
+Returns recent scrapes for the authenticated token.
 
-Returns the recent scrapes belonging to the authenticated token.
+### GET /health
 
-### `GET /health`
+Returns `{"ok": true}`.
 
-Cheap liveness probe — returns `{"ok": true}`.
+## Run it
 
----
-
-## Running the backend
-
-### Requirements
-
-- Python 3.11+
-- A working Chromium (installed automatically by `patchright install chromium`)
-
-### Install
+Python 3.11+ and Chromium (installed by `patchright install chromium`).
 
 ```sh
-git clone https://github.com/SaddexRnx/uscraper.git
-cd uscraper
+git clone https://github.com/SaddexRnx/ultra_fork.git
+cd ultra_fork
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 patchright install chromium
 ```
 
-### Configure
-
-`.env`:
+Create a `.env` file:
 
 ```dotenv
 HOST=0.0.0.0
 PORT=8000
 CACHE_TTL_SECONDS=900
 
-# Optional BYOK fallbacks (any of these enables Tier 3)
+# Optional, any one of these enables the proxy fallback
 SCRAPERAPI_KEY=
 ZENROWS_KEY=
 SCRAPINGBEE_KEY=
 ```
 
-### Run
+Then:
 
 ```sh
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-The frontend at https://uscraper.duckdns.org/ connects by default to `https://uscraper.duckdns.org` — override the Backend API URL from the **Settings** page (gear icon) to point at your instance.
+The frontend points at `https://uscraper.duckdns.org` by default. Change the Backend API URL in its Settings page to point at your own instance.
 
-### Docker
+With Docker:
 
 ```sh
 docker build -t uscraper .
 docker run -p 8000:8000 --env-file .env uscraper
 ```
 
----
+## Credits
 
-## Why so small?
+[Scrapling by d4vinci](https://github.com/d4vinci/Scrapling) does the actual work. If you find this useful, star that repo too.
 
-Because every hard problem is already solved in Scrapling:
-
-- **TLS/JA3 spoofing** → `curl_cffi` (bundled through Scrapling).
-- **Real browser stealth** → `AsyncStealthySession` (patched Chromium + BrowserForge fingerprints).
-- **Cloudflare challenges** → Scrapling waits for `cf-browser-verification` and extracts the clean DOM.
-- **CSS / XPath** → Scrapling's built-in parser.
-- **Cache / rate limit / proxy rotation** → also inside Scrapling.
-
-Ultra Scraper is the mechanic; Scrapling is the factory. That's why 500 lines can do the work of 50,000 — and why it stays fast.
-
----
-
-## Credits & thanks
-
-- **Upstream: [Scrapling by d4vinci](https://github.com/d4vinci/Scrapling)** — the actual heavy lifting. Huge thanks to d4vinci; if you like it, **give it a ⭐**.
-- Frontend: [uscraper](https://github.com/SaddexRnx/uscraper) — live at https://uscraper.duckdns.org/.
-- If you like **Ultra Scraper**, a ⭐ on this repo means a lot.
-- Built by **Saddex** — portfolio: https://saddexrnx.github.io/
-- Contact: Telegram **[@Saddex_x](https://t.me/Saddex_x)**
-
+Built by Saddex. Portfolio: https://saddexrnx.github.io/. Contact: [@Saddex_x](https://t.me/Saddex_x).
