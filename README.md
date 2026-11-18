@@ -9,6 +9,10 @@ POST /scrape
 
 The frontend repo is [here](https://github.com/SaddexRnx/uscraper), live at https://uscraper.duckdns.org/.
 
+## About
+
+I wanted a small, readable layer over Scrapling that I could reason about in one sitting. That's what this is: the orchestration without the ceremony. I'm Saddek, a developer in Algeria. More of my work is at [saddexrnx.github.io](https://saddexrnx.github.io), and you can reach me on [Telegram](https://t.me/Saddex_x).
+
 ## The idea
 
 Scrapling is a full scraping framework, around 50,000 lines of code, with its own HTTP client, TLS and JA3 fingerprinting, headless browser control, fingerprint generation, a Cloudflare solver, CSS and XPath engines, caching, rate limiting, and proxy rotation.
